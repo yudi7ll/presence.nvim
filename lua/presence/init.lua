@@ -503,14 +503,23 @@ end
 function Presence:get_nvim_socket_paths(on_done)
     self.log:debug("Getting nvim socket paths...")
     local sockets = {}
+    local seen_sockets = {}
     local parser = {}
     local cmd
 
     if self.os.is_wsl then
         -- TODO: There needs to be a better way of doing this... no support for ss/netstat?
         -- (See https://github.com/microsoft/WSL/issues/2249)
-        local cmd_fmt = "for file in %s/nvim*; do echo $file/0; done"
-        local shell_cmd = string.format(cmd_fmt, vim.loop.os_tmpdir() or "/tmp")
+        local tmpdir = vim.fn.shellescape(vim.loop.os_tmpdir() or "/tmp")
+        local shell_cmd = "for dir in " .. tmpdir .. [[ "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"; do
+            for file in "$dir"/nvim* "$dir"/nvim*/*; do
+                if [ -S "$file" ]; then
+                    printf '%s\n' "$file"
+                elif [ -S "$file/0" ]; then
+                    printf '%s\n' "$file/0"
+                fi
+            done
+        done]]
 
         cmd = {
             "sh",
@@ -536,14 +545,14 @@ function Presence:get_nvim_socket_paths(on_done)
 
         cmd = table.concat({
             "netstat -u",
-            [[grep --color=never "nvim.*/0"]],
+            [[grep --color=never "nvim"]],
         }, "|")
     elseif self.os.name == "linux" then
         if vim.fn.executable("ss") == 1 then
             -- Use `ss` if available
             cmd = table.concat({
                 "ss -lx",
-                [[grep "nvim.*/0"]],
+                [[grep "nvim"]],
             }, "|")
 
             -- Define ss output parser
@@ -554,7 +563,7 @@ function Presence:get_nvim_socket_paths(on_done)
             -- Use `netstat` if available
             cmd = table.concat({
                 "netstat -u",
-                [[grep --color=never "nvim.*/0"]],
+                [[grep --color=never "nvim"]],
             }, "|")
 
             -- Define netstat output parser
@@ -577,7 +586,15 @@ function Presence:get_nvim_socket_paths(on_done)
 
         for i = 1, #data do
             local socket = parser.parse and parser.parse(vim.trim(data[i])) or vim.trim(data[i])
-            if socket and socket ~= "" and socket ~= self.socket then
+            -- Neovim 0.8+ uses nvim.<pid>.<counter>; older versions end in /0.
+            local is_nvim_socket = socket and socket ~= "" and (
+                self.os.name == "windows"
+                or socket:match("/nvim[^/]*/0$")
+                or socket:match("/nvim%.%d+%.%d+$")
+            )
+
+            if is_nvim_socket and socket ~= self.socket and not seen_sockets[socket] then
+                seen_sockets[socket] = true
                 table.insert(sockets, socket)
             end
         end
